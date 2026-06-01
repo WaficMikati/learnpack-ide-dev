@@ -503,6 +503,22 @@ export const createGithubRepo = async (
   }
 };
 
+export const resetGithubSync = async (courseSlug: string, targetSHA: string) => {
+  const response = await axios.post(
+    `${DEV_MODE ? "http://localhost:3000" : ""}/actions/github/reset-sync`,
+    { courseSlug, targetSHA }
+  );
+  return response.data;
+};
+
+export const unlinkGithub = async (courseSlug: string) => {
+  const response = await axios.post(
+    `${DEV_MODE ? "http://localhost:3000" : ""}/actions/github/unlink`,
+    { courseSlug }
+  );
+  return response.data;
+};
+
 export const checkGithubChanges = async (courseSlug: string) => {
   try {
     const response = await axios.get(

@@ -423,6 +423,8 @@ export interface IStore {
     targetStart: number
   ) => Promise<void>;
   initRigoAI: () => void;
+  markdownEditorEnabled: boolean;
+  setMarkdownEditorEnabled: (enabled: boolean) => void;
   // History management
   historyVersion: string;
   canUndo: boolean;

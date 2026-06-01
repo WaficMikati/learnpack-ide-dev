@@ -9,6 +9,8 @@ import {
   checkGithubChanges,
   pullFromGithub,
   pushToGithub,
+  unlinkGithub,
+  resetGithubSync,
 } from "../../../utils/creator";
 import { Loader } from "../../composites/Loader/Loader";
 import { Icon } from "@/components/Icon";
@@ -16,6 +18,8 @@ import { getSlugFromPath } from "../../../utils/lib";
 
 type CheckChangesResponse = {
   hasChanges: boolean;
+  repoNotFound?: boolean;
+  syncStateBroken?: boolean;
   currentSHA?: string;
   lastSyncSHA?: string;
   syncableChanges?: {
@@ -61,6 +65,8 @@ export function GitHubActions() {
     configured: boolean;
     linked: boolean;
     repository: string | null;
+    pathPrefix: string | null;
+    defaultBranch: string | null;
   } | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
   const [changes, setChanges] = useState<CheckChangesResponse | null>(null);
@@ -78,9 +84,17 @@ export function GitHubActions() {
         configured: data.configured ?? false,
         linked: data.linked ?? false,
         repository: data.repository ?? null,
+        pathPrefix: data.pathPrefix ?? null,
+        defaultBranch: data.defaultBranch ?? null,
       });
     } catch {
-      setStatus({ configured: false, linked: false, repository: null });
+      setStatus({
+        configured: false,
+        linked: false,
+        repository: null,
+        pathPrefix: null,
+        defaultBranch: null,
+      });
     } finally {
       setStatusLoading(false);
     }
@@ -90,6 +104,41 @@ export function GitHubActions() {
     fetchStatus();
   }, [courseSlug]);
 
+  const promptUnlinkIfRepoMissing = async (
+    isMissing: boolean | undefined,
+    toastId: string
+  ): Promise<boolean> => {
+    if (!isMissing) return false;
+    toast.dismiss(toastId);
+    if (window.confirm("Repo not found. Unlink repo?")) {
+      await unlinkGithub(courseSlug);
+      setChanges(null);
+      await fetchStatus();
+      toast.success("Repository unlinked");
+    }
+    return true;
+  };
+
+  const promptResetSyncIfBroken = async (
+    isBroken: boolean | undefined,
+    currentSHA: string | undefined,
+    toastId: string
+  ): Promise<boolean> => {
+    if (!isBroken || !currentSHA) return false;
+    toast.dismiss(toastId);
+    if (
+      window.confirm(
+        "Sync state is out of date — the repo's history was rewritten (force-push or rebase). Reset tracking to the current head? Your bucket content won't change."
+      )
+    ) {
+      await resetGithubSync(courseSlug, currentSHA);
+      setChanges(null);
+      await fetchStatus();
+      toast.success("Sync state reset");
+    }
+    return true;
+  };
+
   const handleCreateRepo = async () => {
     if (!courseSlug || !token) {
       toast.error("Course slug or token not available");
@@ -98,7 +147,7 @@ export function GitHubActions() {
     setActionLoading("create");
     const toastId = toast.loading("Creating GitHub repository...");
     try {
-      await createGithubRepo(courseSlug, courseSlug, false, token);
+      await createGithubRepo(courseSlug, courseSlug, true, token);
       toast.success("Repository created successfully", { id: toastId });
       setChanges(null);
       await fetchStatus();
@@ -116,6 +165,15 @@ export function GitHubActions() {
     const toastId = toast.loading("Checking for changes...");
     try {
       const data = await checkGithubChanges(courseSlug);
+      if (await promptUnlinkIfRepoMissing(data.repoNotFound, toastId)) return;
+      if (
+        await promptResetSyncIfBroken(
+          data.syncStateBroken,
+          data.currentSHA,
+          toastId
+        )
+      )
+        return;
       setChanges(data);
       if (!data.hasChanges) {
         toast.success("No changes in GitHub", { id: toastId });
@@ -139,6 +197,15 @@ export function GitHubActions() {
     const toastId = toast.loading("Pulling from GitHub...");
     try {
       const result = await pullFromGithub(courseSlug, changes.currentSHA);
+      if (await promptUnlinkIfRepoMissing(result?.repoNotFound, toastId)) return;
+      if (
+        await promptResetSyncIfBroken(
+          result?.syncStateBroken,
+          result?.currentSHA,
+          toastId
+        )
+      )
+        return;
       toast.success(
         `Synced ${result.syncedFiles ?? 0} file(s), ${result.removedFiles ?? 0} removed`,
         { id: toastId }
@@ -160,6 +227,7 @@ export function GitHubActions() {
     const toastId = toast.loading("Pushing to GitHub...");
     try {
       const result = await pushToGithub(courseSlug);
+      if (await promptUnlinkIfRepoMissing(result?.repoNotFound, toastId)) return;
       toast.success(
         `Pushed ${result.totalFiles ?? 0} file(s) to GitHub`,
         { id: toastId }
@@ -209,6 +277,24 @@ export function GitHubActions() {
 
   return (
     <div className="flex-y gap-small padding-small">
+      {status?.repository && (
+        <SimpleButton
+          extraClass={buttonClass}
+          svg={<Icon name="Copy" size={16} />}
+          text="Copy Repo URL"
+          action={() => {
+            const base = status.repository!.startsWith("http")
+              ? status.repository!
+              : `https://github.com/${status.repository}`;
+            const url = status.pathPrefix
+              ? `${base}/tree/${status.defaultBranch || "main"}/${status.pathPrefix}`
+              : base;
+            navigator.clipboard.writeText(url);
+            toast.success("Repo URL copied to clipboard");
+          }}
+          disabled={!!actionLoading}
+        />
+      )}
       <SimpleButton
         extraClass={buttonClass}
         svg={<Icon name="Upload" size={16} />}

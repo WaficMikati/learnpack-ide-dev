@@ -9,7 +9,7 @@ import { LocalStorage } from "../managers/localStorage";
 import assessmentComponentsRaw from "../../docs/assessment_components.yml?raw";
 import explanatoryComponentsRaw from "../../docs/explanatory_components.yml?raw";
 // import toast from "react-hot-toast";
-export const DEV_MODE =false;
+export const DEV_MODE =true;
 export const DEV_URL = "https://1gm40gnb-3000.use2.devtunnels.ms/";
 
 export const FASTAPI_HOST = "https://ai.4geeks.com";
