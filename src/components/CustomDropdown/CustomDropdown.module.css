@@ -9,7 +9,7 @@
 
 .dropdownMenu {
   position: absolute;
-  background-color: #dce9ff;
+  background-color: var(--dropdown-bg-color, #dce9ff);
   border-radius: 0.25rem;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   z-index: 1000;

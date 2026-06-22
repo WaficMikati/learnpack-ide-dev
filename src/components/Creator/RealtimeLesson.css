@@ -22,8 +22,8 @@
 /* Enhanced Continue Button */
 .continue-generation-btn {
   background: linear-gradient(135deg, #ffffff 0%, #f8faff 100%) !important;
-  border: 2px solid #0084ff !important;
-  color: #0084ff !important;
+  border: 2px solid #81c8be !important;
+  color: #81c8be !important;
   padding: 12px 20px !important;
   border-radius: 25px !important;
   font-weight: 600 !important;
@@ -41,7 +41,7 @@
   left: -100%;
   width: 100%;
   height: 100%;
-  background: linear-gradient(135deg, #0084ff 0%, #0056b3 100%);
+  background: linear-gradient(135deg, #81c8be 0%, #5ba8a0 100%);
   transition: left 0.3s ease;
   z-index: -1;
 }
@@ -58,7 +58,7 @@
 
 /* Chat Header */
 .chat-header {
-  background: linear-gradient(135deg, #0084ff 0%, #0056b3 100%);
+  background: linear-gradient(135deg, #81c8be 0%, #5ba8a0 100%);
   color: white;
   padding: 10px 15px;
   display: flex;
@@ -252,7 +252,7 @@
 }
 
 .chat-send-button {
-  background: linear-gradient(135deg, #0084ff 0%, #0056b3 100%) !important;
+  background: linear-gradient(135deg, #81c8be 0%, #5ba8a0 100%) !important;
   color: white !important;
   border: none !important;
   padding: 14px 32px !important;
@@ -276,7 +276,7 @@
   left: -100%;
   width: 100%;
   height: 100%;
-  background: linear-gradient(135deg, #0056b3 0%, #003d82 100%);
+  background: linear-gradient(135deg, #5ba8a0 0%, #003d82 100%);
   transition: left 0.3s ease;
   z-index: -1;
 }

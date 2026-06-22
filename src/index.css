@@ -27,25 +27,26 @@
   }
 
   :root:has(main.dark) {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
+    /* Catppuccin Mocha */
+    --background: 240 21% 15%;       /* Base #1e1e2e */
+    --foreground: 226 64% 88%;       /* Text #cdd6f4 */
+    --card: 237 16% 23%;             /* Surface 0 #313244 */
+    --card-foreground: 226 64% 88%;
+    --popover: 237 16% 23%;
+    --popover-foreground: 226 64% 88%;
+    --primary: 170 36% 64%;          /* Frappé Teal #81c8be */
+    --primary-foreground: 240 21% 15%;
+    --secondary: 237 12% 31%;        /* Surface 1 #45475a */
+    --secondary-foreground: 226 64% 88%;
+    --muted: 237 16% 23%;
+    --muted-foreground: 228 22% 73%; /* Subtext 0 #a6adc8 */
+    --accent: 237 12% 31%;
+    --accent-foreground: 226 64% 88%;
+    --destructive: 343 81% 75%;      /* Red #f38ba8 */
+    --destructive-foreground: 240 21% 15%;
+    --border: 237 12% 31%;
+    --input: 237 16% 23%;
+    --ring: 170 36% 64%;             /* Frappé Teal */
   }
 }
 
@@ -62,8 +63,8 @@
   --bg-color-dark-gray: #a1a1a1;
   --bg-color: #f9f9f9;
   --app-bg-color: white;
-  --color-active: #0084ff;
-  
+  --color-active: #81c8be;
+
   --header-height: 90px;
 
   --4geeks-yellow: #ffd900;
@@ -78,7 +79,7 @@
 
   --soft-blue: #eef9fe;
 
-  --color-blue-rigo: #0084ff;
+  --color-blue-rigo: #81c8be;
   --tabs-bg-color: #f4faff;
   --color-hovered: rgba(224, 224, 224, 0.665);
   --light-grey: #dadada;
@@ -109,35 +110,120 @@
 }
 
 :root:has(main.dark) {
+  /* Catppuccin Mocha */
   font-size: 16px;
-  --bg-color-dark-gray: #a1a1a1;
-  --bg-color: #111f39;
-  /* --app-bg-color: #00041a; */
-  --app-bg-color: #111f39;
-  --app-bg-color-opaque: #00041a38;
-  --color-active: #02a9ea;
-  --4geeks-yellow: #ffd900;
-  --opaque-blue-editor: #a5d9f8;
-  --soft-blue: #dff5ff;
-  --color-blue-opaque: #012c57;
-  --color-hovered: rgba(95, 95, 95, 0.311);
-  --color-success: #21b761;
-  --color-fail: #eb5757;
-  --bg-color-code: #2d3748;
-  --link-inactive-color: #a9a9a9;
-  --backdrop-background: rgba(0, 0, 0, 0.7);
-  --tabs-bg-color: #1e1e1e;
-  --font-color-secondary: #9c9c9c;
+  --bg-color-dark-gray: #6c7086;     /* Overlay 0 */
+  --bg-color: #1e1e2e;               /* Base */
+  --app-bg-color: #1e1e2e;           /* Base */
+  --app-bg-color-opaque: rgba(30, 30, 46, 0.22);
+  --color-active: #81c8be;           /* Teal */
+  --4geeks-yellow: #f9e2af;          /* Yellow */
+  --opaque-blue-editor: #81c8be;     /* Teal */
+  --soft-blue: #81c8be;             /* Teal */
+  --color-blue-opaque: #313244;      /* Surface 0 */
+  --color-hovered: rgba(69, 71, 90, 0.5); /* Surface 1 */
+  --color-success: #a6e3a1;          /* Green */
+  --color-fail: #f38ba8;             /* Red */
+  --bg-color-code: #313244;          /* Surface 0 */
+  --link-inactive-color: #6c7086;    /* Overlay 0 */
+  --backdrop-background: rgba(17, 17, 27, 0.8); /* Crust */
+  --tabs-bg-color: #181825;          /* Mantle */
+  --font-color-secondary: #bac2de;   /* Subtext 1 — brighter for dark bg readability */
   --font-size-small: 16px;
   --font-size-medium: 18px;
-  --dropdown-bg-color: var(--bg-color);
-  --read-font-color: white;
-  --font-color-secondary: #7697d4;
-  --gray-blue-color: #9fbdf0;
-  --white: #000000;
-  --bg-1: #111f39;
-  --bg-2: #1a2d50;
-  --sidebar-bg-color: #131b25;
+  --dropdown-bg-color: #313244;      /* Surface 0 */
+  --read-font-color: #cdd6f4;        /* Text */
+  --gray-blue-color: #81c8be;        /* Teal */
+  --color-blue-rigo: #81c8be;        /* Teal */
+  --white: #1e1e2e;                  /* Base (inverted) */
+  --bg-1: #1e1e2e;                   /* Base */
+  --bg-2: #313244;                   /* Surface 0 */
+  --sidebar-bg-color: #181825;       /* Mantle */
+}
+
+/* Ensure dark text on teal backgrounds in dark mode */
+:root:has(main.dark) .bg-blue-rigo,
+:root:has(main.dark) [class*="bg-blue-rigo"],
+:root:has(main.dark) .button-t,
+:root:has(main.dark) button.active {
+  color: #1e1e2e !important;
+}
+
+/* Dark icons/SVGs on teal backgrounds */
+:root:has(main.dark) .bg-blue-rigo svg,
+:root:has(main.dark) .bg-blue-rigo path,
+:root:has(main.dark) .svg-white.bg-blue-rigo svg {
+  fill: #1e1e2e !important;
+  stroke: #1e1e2e !important;
+}
+
+/* CSS variable-based teal backgrounds */
+:root:has(main.dark) [style*="color-blue-rigo"],
+:root:has(main.dark) [style*="color-active"] {
+  color: #1e1e2e !important;
+}
+
+/* Hardcoded white text on teal hover/active states */
+:root:has(main.dark) .on-hover-active:hover {
+  color: #1e1e2e !important;
+}
+
+/* Continue/Finish button (.bg-blue) */
+:root:has(main.dark) .bg-blue {
+  color: #1e1e2e !important;
+}
+
+/* Active editor tab */
+:root:has(main.dark) .tab.active button {
+  color: #1e1e2e !important;
+}
+
+/* Text on teal panel in modals */
+:root:has(main.dark) .bg-soft-blue,
+:root:has(main.dark) .bg-soft-blue * {
+  color: #1e1e2e !important;
+}
+
+/* Tailwind gray text on dark backgrounds */
+:root:has(main.dark) .text-gray-600,
+:root:has(main.dark) .text-gray-500,
+:root:has(main.dark) .text-gray-400 {
+  color: #bac2de !important; /* Subtext 1 */
+}
+
+/* Sidebar exercise number circles */
+:root:has(main.dark) .exercise-circle {
+  color: #81c8be !important; /* Teal */
+}
+:root:has(main.dark) .exercise-circle.done {
+  background-color: #81c8be !important;
+  color: #1e1e2e !important;
+}
+
+/* Progress bar unfilled segments */
+:root:has(main.dark) {
+  --steps-remaining-color: #45475a; /* Surface 1 */
+}
+
+/* GitHub Actions / dev menu — override Tailwind yellow in dark mode */
+:root:has(main.dark) .bg-yellow-50  { background-color: #313244 !important; } /* Surface 0 */
+:root:has(main.dark) .bg-yellow-100 { background-color: #45475a !important; } /* Surface 1 */
+:root:has(main.dark) .bg-yellow-200 { background-color: #585b70 !important; } /* Surface 2 */
+:root:has(main.dark) .text-yellow-800,
+:root:has(main.dark) .text-yellow-700 { color: #cdd6f4 !important; }          /* Text */
+:root:has(main.dark) .border-yellow-200 { border-color: #45475a !important; }  /* Surface 1 */
+:root:has(main.dark) .border-yellow-300 { border-color: #585b70 !important; }  /* Surface 2 */
+:root:has(main.dark) .hover\:bg-yellow-200:hover { background-color: #585b70 !important; }
+
+/* Sidebar header and toggle on teal background */
+:root:has(main.dark) .bg-rigo,
+:root:has(main.dark) .bg-rigo * {
+  color: #1e1e2e !important;
+}
+:root:has(main.dark) .bg-rigo svg,
+:root:has(main.dark) .bg-rigo path {
+  fill: #1e1e2e !important;
+  stroke: #1e1e2e !important;
 }
 
 * {

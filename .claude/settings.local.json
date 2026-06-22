@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep -l \"proxy\\\\|server\\\\|middleware\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\arch-backup\\\\home\\\\siku\\\\code\\\\windows\\\\Learnpack\\\\Code\\\\ide\" -Directory)",
+      "Bash(Select-Object -First 20)"
+    ]
+  }
+}

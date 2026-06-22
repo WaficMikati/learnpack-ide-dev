@@ -259,7 +259,7 @@ const useStore = create<IStore>((set, get) => ({
     className: "",
   },
   isCreator: false,
-  theme: "light",
+  theme: "dark",
   isIframe: false,
   tabHash: "",
   sessionKey: "",

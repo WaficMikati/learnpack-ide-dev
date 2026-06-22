@@ -16,5 +16,5 @@
 }
 
 .remaining {
-  background-color: var(--light-grey);
+  background-color: var(--steps-remaining-color, var(--light-grey));
 }

@@ -546,31 +546,12 @@ const CustomImage = ({
       const isUserUploadedImage = alt?.startsWith("/.learn/assets/") || alt?.startsWith(".learn/assets/");
       const isAIImageInAssets = src.includes("/.learn/assets/") || src.startsWith(".learn/assets/");
 
-      // If it's an AI image proposal (in .learn/assets, no "GENERATING" prefix, and alt is not a path), 
-      // show RealtimeImage directly. Proposals don't have images yet, so we shouldn't wait for hasError
-      if (isAIImageInAssets && !isGenerating && !isUserUploadedImage) {
-        return (
-          <CreatorWrapper node={node} tagName="img">
-            <RealtimeImage
-              allowCreate={allowCreate}
-              imageId={src.split("/").pop() || ""}
-              alt={alt || ""}
-              node={node}
-            />
-          </CreatorWrapper>
-        );
-      }
-
-      // For images with "GENERATING" prefix, user-uploaded images, or external images, try to load first
-      // If it fails and has "GENERATING", show RealtimeImage (handles both generating and completed images with bug)
+      // Try to load the image first. Fall back to RealtimeImage only on load failure,
+      // covering both AI proposals (no real file yet) and images still generating.
+      const isAIProposal = isAIImageInAssets && !isGenerating && !isUserUploadedImage;
       return (
         <CreatorWrapper node={node} tagName="img">
-          {/* TODO: Edge case - AI-generated images that completed successfully still have "GENERATING" 
-          prefix in their alt (backend webhook doesn't clean it). If such an image fails to load, 
-          it shows "Image generation in process" instead of a load error 
-          because RealtimeImage is rendered (due to "GENERATING" prefix).
-          Fix: Backend webhook should remove "GENERATING:" prefix from alt after successful generation. */}
-          {hasError && environment === "creatorWeb" && isGenerating ? (
+          {hasError && environment === "creatorWeb" && (isGenerating || isAIProposal) ? (
             <RealtimeImage
               allowCreate={allowCreate}
               imageId={src.split("/").pop() || ""}
@@ -578,7 +559,6 @@ const CustomImage = ({
               node={node}
             />
           ) : hasError ? (
-            // Load error in creator mode
             <ImageErrorDisplay errorType="load" isCreator={true} />
           ) : (
             <img

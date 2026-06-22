@@ -10,6 +10,7 @@ import {
   pullFromGithub,
   pushToGithub,
   unlinkGithub,
+  relinkGithub,
   resetGithubSync,
 } from "../../../utils/creator";
 import { Loader } from "../../composites/Loader/Loader";
@@ -67,10 +68,14 @@ export function GitHubActions() {
     repository: string | null;
     pathPrefix: string | null;
     defaultBranch: string | null;
+    repoNotFound: boolean;
   } | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
   const [changes, setChanges] = useState<CheckChangesResponse | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [showUnlinkModal, setShowUnlinkModal] = useState(false);
+  const [showRelinkInput, setShowRelinkInput] = useState(false);
+  const [relinkUrl, setRelinkUrl] = useState("");
 
   const courseSlug =
     configObject?.config?.slug || getSlugFromPath() || "";
@@ -80,13 +85,16 @@ export function GitHubActions() {
     setStatusLoading(true);
     try {
       const data = await getGithubStatus(courseSlug);
+      const repoNotFound = data.repoNotFound ?? false;
       setStatus({
         configured: data.configured ?? false,
         linked: data.linked ?? false,
         repository: data.repository ?? null,
         pathPrefix: data.pathPrefix ?? null,
         defaultBranch: data.defaultBranch ?? null,
+        repoNotFound,
       });
+      if (repoNotFound) setShowUnlinkModal(true);
     } catch {
       setStatus({
         configured: false,
@@ -110,13 +118,39 @@ export function GitHubActions() {
   ): Promise<boolean> => {
     if (!isMissing) return false;
     toast.dismiss(toastId);
-    if (window.confirm("Repo not found. Unlink repo?")) {
+    setShowUnlinkModal(true);
+    return true;
+  };
+
+  const handleUnlink = async () => {
+    setShowUnlinkModal(false);
+    const toastId = toast.loading("Unlinking repository...");
+    try {
       await unlinkGithub(courseSlug);
       setChanges(null);
       await fetchStatus();
-      toast.success("Repository unlinked");
+      toast.success("Repository unlinked", { id: toastId });
+    } catch (err) {
+      const msg = getRequestErrorMessage(err, "Failed to unlink repository");
+      toast.error(msg, { id: toastId });
     }
-    return true;
+  };
+
+  const handleRelink = async () => {
+    if (!relinkUrl.trim()) return;
+    const toastId = toast.loading("Relinking repository...");
+    try {
+      await relinkGithub(courseSlug, relinkUrl.trim());
+      setShowUnlinkModal(false);
+      setShowRelinkInput(false);
+      setRelinkUrl("");
+      setChanges(null);
+      await fetchStatus();
+      toast.success("Repository relinked", { id: toastId });
+    } catch (err) {
+      const msg = getRequestErrorMessage(err, "Failed to relink repository");
+      toast.error(msg, { id: toastId });
+    }
   };
 
   const promptResetSyncIfBroken = async (
@@ -244,6 +278,62 @@ export function GitHubActions() {
 
   if (!courseSlug) return null;
 
+  if (showUnlinkModal) {
+    return (
+      <div className="flex-y gap-small padding-small">
+        <p className="text-small text-yellow-800">
+          The linked repository was not found and may have been deleted.
+        </p>
+        {showRelinkInput ? (
+          <div className="flex-y gap-small">
+            <input
+              className="text-small padding-small rounded border border-yellow-300 bg-yellow-50"
+              placeholder="https://github.com/user/repo"
+              value={relinkUrl}
+              onChange={e => setRelinkUrl(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleRelink()}
+              autoFocus
+            />
+            <SimpleButton
+              extraClass={buttonClass}
+              svg={<Icon name="Link" size={16} />}
+              text="Confirm Relink"
+              action={handleRelink}
+              disabled={!relinkUrl.trim()}
+            />
+            <SimpleButton
+              extraClass={buttonClass}
+              svg={<Icon name="ChevronLeft" size={16} />}
+              text="Back"
+              action={() => setShowRelinkInput(false)}
+            />
+          </div>
+        ) : (
+          <div className="flex-y gap-small">
+            <SimpleButton
+              extraClass={buttonClass}
+              svg={<Icon name="Link" size={16} />}
+              text="Relink"
+              action={() => setShowRelinkInput(true)}
+            />
+            <SimpleButton
+              extraClass={buttonClass}
+              svg={<Icon name="Trash2" size={16} />}
+              text="Unlink"
+              action={handleUnlink}
+            />
+            <SimpleButton
+              extraClass={buttonClass}
+              svg={<Icon name="X" size={16} />}
+              text="Cancel"
+              action={() => setShowUnlinkModal(false)}
+            />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (statusLoading) {
     return (
       <div className="flex-x gap-small align-center padding-small">
@@ -309,6 +399,13 @@ export function GitHubActions() {
         action={handleCheckChanges}
         disabled={!!actionLoading}
       />
+      <SimpleButton
+        extraClass={buttonClass}
+        svg={<Icon name="Unlink" size={16} />}
+        text="Unlink"
+        action={handleUnlink}
+        disabled={!!actionLoading}
+      />
 
       {changes?.hasChanges && (
         <div className="flex-y gap-small padding-small border-t border-yellow-200">
@@ -354,13 +451,15 @@ export function GitHubActions() {
               </div>
             )}
 
-          <SimpleButton
-            extraClass={buttonClass}
-            svg={<Icon name="Download" size={16} />}
-            text="Pull GitHub -> Bucket"
-            action={handlePull}
-            disabled={!!actionLoading}
-          />
+          {(changes.syncableChanges?.totalFiles ?? 0) > 0 && (
+            <SimpleButton
+              extraClass={buttonClass}
+              svg={<Icon name="Download" size={16} />}
+              text="Pull GitHub -> Bucket"
+              action={handlePull}
+              disabled={!!actionLoading}
+            />
+          )}
         </div>
       )}
     </div>

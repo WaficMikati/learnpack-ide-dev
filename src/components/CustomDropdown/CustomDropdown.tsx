@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, FC, ReactNode } from "react";
 import styles from "./CustomDropdown.module.css";
 import { createPortal } from "react-dom";
+import useStore from "../../utils/store";
 
 interface CustomDropdownProps {
   /** The trigger button content */
@@ -166,6 +167,9 @@ const CustomDropdown: FC<CustomDropdownProps> = ({
     }
   };
 
+  const theme = useStore((s) => s.theme);
+  const isDark = theme === "dark";
+
   return (
     <div ref={containerRef} className={`${styles.customDropdown} pos-relative ${className}`}>
       <div onClick={handleToggle} className={styles.dropdownTrigger}>
@@ -180,6 +184,8 @@ const CustomDropdown: FC<CustomDropdownProps> = ({
               position: 'absolute',
               top: `${dropdownPosition.top}px`,
               left: `${dropdownPosition.left}px`,
+              backgroundColor: isDark ? "#313244" : undefined,
+              color: isDark ? "#cdd6f4" : undefined,
             }}
           >
             {children}
