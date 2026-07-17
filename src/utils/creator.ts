@@ -527,6 +527,19 @@ export const relinkGithub = async (courseSlug: string, repository: string) => {
   return response.data;
 };
 
+export const syncAllTranslations = async (
+  courseSlug: string,
+  sourceLanguage: "en" | "es",
+  rigoToken: string
+) => {
+  const response = await axios.post(
+    `${DEV_MODE ? "http://localhost:3000" : ""}/actions/sync-all-translations?slug=${courseSlug}`,
+    { sourceLanguage },
+    { headers: { "x-rigo-token": rigoToken } }
+  );
+  return response.data;
+};
+
 export const checkGithubChanges = async (courseSlug: string) => {
   try {
     const response = await axios.get(

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import useStore from "../../../utils/store";
 import SimpleButton from "../../mockups/SimpleButton";
@@ -12,10 +12,12 @@ import {
   unlinkGithub,
   relinkGithub,
   resetGithubSync,
+  syncAllTranslations,
 } from "../../../utils/creator";
 import { Loader } from "../../composites/Loader/Loader";
 import { Icon } from "@/components/Icon";
-import { getSlugFromPath } from "../../../utils/lib";
+import { getSlugFromPath, DEV_MODE } from "../../../utils/lib";
+import CreatorSocket from "../../../managers/creatorSocket";
 
 type CheckChangesResponse = {
   hasChanges: boolean;
@@ -56,10 +58,11 @@ const getRequestErrorMessage = (err: unknown, fallback: string): string => {
 };
 
 export function GitHubActions() {
-  const { token, configObject, fetchReadme } = useStore((state) => ({
+  const { token, configObject, fetchReadme, exercises } = useStore((state) => ({
     token: state.token,
     configObject: state.configObject,
     fetchReadme: state.fetchReadme,
+    exercises: state.exercises,
   }));
 
   const [status, setStatus] = useState<{
@@ -76,9 +79,30 @@ export function GitHubActions() {
   const [showUnlinkModal, setShowUnlinkModal] = useState(false);
   const [showRelinkInput, setShowRelinkInput] = useState(false);
   const [relinkUrl, setRelinkUrl] = useState("");
+  const [translateDirection, setTranslateDirection] = useState<
+    "en-es" | "es-en"
+  >("en-es");
+  const [translateProgress, setTranslateProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
+  const translateToastRef = useRef<string | null>(null);
+  const translateTargetRef = useRef<string>("ES");
 
   const courseSlug =
     configObject?.config?.slug || getSlugFromPath() || "";
+
+  // The batch translate feature is only offered for courses whose languages
+  // are exactly {en, es}. Any other language set disables it (safeguard).
+  const enEsOnly = useMemo(() => {
+    const langs = new Set<string>();
+    (exercises || []).forEach((ex) =>
+      Object.keys(ex.translations || {}).forEach((code) =>
+        langs.add(code === "us" ? "en" : code)
+      )
+    );
+    return langs.size === 2 && langs.has("en") && langs.has("es");
+  }, [exercises]);
 
   const fetchStatus = async () => {
     if (!courseSlug) return;
@@ -111,6 +135,104 @@ export function GitHubActions() {
   useEffect(() => {
     fetchStatus();
   }, [courseSlug]);
+
+  // Live progress channel for the batch "Translate all lessons" action.
+  useEffect(() => {
+    if (!courseSlug) return;
+    const sock = new CreatorSocket(DEV_MODE ? "http://localhost:3000" : "");
+    sock.connect();
+    sock.emit("register", { courseSlug });
+
+    const onProgress = (data: { completed: number; total: number }) => {
+      setTranslateProgress({ completed: data.completed, total: data.total });
+      if (translateToastRef.current) {
+        toast.loading(
+          `Translating ${data.completed}/${data.total} → ${translateTargetRef.current}…`,
+          { id: translateToastRef.current }
+        );
+      }
+    };
+
+    const onCompleted = (data: {
+      translated: number;
+      failed: number;
+      inSync: number;
+    }) => {
+      if (translateToastRef.current) {
+        const parts = [`${data.translated} translated`];
+        if (data.failed) parts.push(`${data.failed} failed`);
+        if (data.inSync) parts.push(`${data.inSync} in sync`);
+        const msg = parts.join(", ");
+        if (data.failed) {
+          toast.error(msg, { id: translateToastRef.current });
+        } else {
+          toast.success(msg, { id: translateToastRef.current });
+        }
+        translateToastRef.current = null;
+      }
+      setTranslateProgress(null);
+      setActionLoading(null);
+      fetchReadme();
+    };
+
+    const onError = (data: { error: string }) => {
+      if (translateToastRef.current) {
+        toast.error(data.error || "Translation failed", {
+          id: translateToastRef.current,
+        });
+        translateToastRef.current = null;
+      }
+      setTranslateProgress(null);
+      setActionLoading(null);
+    };
+
+    sock.on("sync-all-progress", onProgress);
+    sock.on("sync-all-completed", onCompleted);
+    sock.on("sync-all-error", onError);
+
+    return () => {
+      sock.off("sync-all-progress", onProgress);
+      sock.off("sync-all-completed", onCompleted);
+      sock.off("sync-all-error", onError);
+      sock.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseSlug]);
+
+  const handleTranslateAll = async () => {
+    if (!courseSlug || !token || !enEsOnly || actionLoading) return;
+    const sourceLanguage = translateDirection === "en-es" ? "en" : "es";
+    translateTargetRef.current = translateDirection === "en-es" ? "ES" : "EN";
+    setActionLoading("translate");
+    setTranslateProgress(null);
+    const toastId = toast.loading("Scanning lessons for changes...");
+    translateToastRef.current = toastId;
+    try {
+      const res = await syncAllTranslations(courseSlug, sourceLanguage, token);
+      const total = res?.total ?? 0;
+      const inSync = res?.inSync ?? 0;
+      if (total === 0) {
+        toast.success(
+          `All lessons already in sync${inSync ? ` (${inSync} skipped)` : ""}`,
+          { id: toastId }
+        );
+        translateToastRef.current = null;
+        setActionLoading(null);
+        return;
+      }
+      // Hand off to the socket handlers for live progress + completion.
+      setTranslateProgress({ completed: 0, total });
+      toast.loading(
+        `Translating 0/${total} → ${translateTargetRef.current}…`,
+        { id: toastId }
+      );
+    } catch (err) {
+      const msg = getRequestErrorMessage(err, "Failed to start translation");
+      toast.error(msg, { id: toastId });
+      translateToastRef.current = null;
+      setActionLoading(null);
+    }
+  };
 
   const promptUnlinkIfRepoMissing = async (
     isMissing: boolean | undefined,
@@ -406,6 +528,34 @@ export function GitHubActions() {
         action={handleUnlink}
         disabled={!!actionLoading}
       />
+
+      <div className="flex-y gap-small padding-small border-t border-yellow-200">
+        <SimpleButton
+          extraClass={buttonClass}
+          svg={<Icon name="ArrowLeftRight" size={16} />}
+          text={translateDirection === "en-es" ? "EN → ES" : "ES → EN"}
+          action={() =>
+            setTranslateDirection((d) => (d === "en-es" ? "es-en" : "en-es"))
+          }
+          disabled={!enEsOnly || !!actionLoading}
+        />
+        <SimpleButton
+          extraClass={buttonClass}
+          svg={<Icon name="Languages" size={16} />}
+          text={
+            actionLoading === "translate" && translateProgress
+              ? `Translating ${translateProgress.completed}/${translateProgress.total}…`
+              : "Translate all lessons"
+          }
+          action={handleTranslateAll}
+          disabled={!enEsOnly || !!actionLoading}
+        />
+        {!enEsOnly && (
+          <p className="text-small text-yellow-700">
+            Only available for courses with exactly EN and ES.
+          </p>
+        )}
+      </div>
 
       {changes?.hasChanges && (
         <div className="flex-y gap-small padding-small border-t border-yellow-200">
