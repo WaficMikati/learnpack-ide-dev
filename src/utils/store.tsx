@@ -28,11 +28,17 @@ import {
   // FASTAPI_HOST,
   removeFrontMatter,
   getSlugFromPath,
+  ensureMinDuration,
+  resolveCourseTitle,
+  isWebStudentEnvironment,
+  isWebTelemetryEnvironment,
   // getMainIndex,
 } from "./lib";
 import {
   IStore,
   TAgent,
+  TAppLoadingError,
+  TApprovedSolutionFile,
   TExercise,
   TMode,
   TParamsActions,
@@ -44,7 +50,11 @@ import {
 } from "./storeTypes";
 import toast from "react-hot-toast";
 import { getStatus } from "../managers/socket";
-import { DEV_MODE, RIGOBOT_HOST } from "./lib";
+import {
+  DEV_MODE,
+  RIGOBOT_EVALUATION_TIMEOUT_MS,
+  RIGOBOT_HOST,
+} from "./lib";
 import { EventProxy } from "../managers/EventProxy";
 import { FetchManager } from "../managers/fetchManager";
 import {
@@ -54,8 +64,16 @@ import {
   getSession,
   updateSession,
   isPackageAuthor,
+  fetchLearnpackPackageInfo,
 } from "./apiCalls";
-import TelemetryManager, { TStep } from "../managers/telemetry";
+import TelemetryManager, {
+  TStep,
+  submitTelemetryToRigobotViaBeacon,
+  fetchTelemetryWithStatus,
+} from "../managers/telemetry";
+import { TTelemetryFetchStatus } from "./storeTypes";
+
+let telemetryLifecycleListenersRegistered = false;
 import { RigoAI } from "../components/Rigobot/AI";
 import { svgs } from "../assets/svgs";
 import { Notifier } from "../managers/Notifier";
@@ -141,7 +159,9 @@ const mergeExercisesWithSession = (
     );
     return {
       ...currentEx,
-      done: sessionEx?.done ?? currentEx.done ?? false
+      done: sessionEx?.done ?? currentEx.done ?? false,
+      approved_solution_files:
+        sessionEx?.approved_solution_files ?? currentEx.approved_solution_files,
     };
   });
 };
@@ -214,6 +234,79 @@ const removeCodeChallengeProposalsFromBackend = async (
   }
 };
 
+/**
+ * Post-start setup shared between startTelemetry (happy path) and proceedWithTelemetry
+ * (student continues after timeout / server error). Registers lifecycle and struggle
+ * listeners and emits the initial open_step event.
+ */
+function _afterTelemetryStarted(
+  agent: TAgent,
+  steps: TStep[],
+  skipDuplicateBootstrap: boolean,
+  setOpenedModals: IStore["setOpenedModals"],
+  registerTelemetryEvent: IStore["registerTelemetryEvent"],
+  currentExercisePosition: IStore["currentExercisePosition"]
+) {
+  if (agent === "cloud" && !telemetryLifecycleListenersRegistered) {
+    telemetryLifecycleListenersRegistered = true;
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        void TelemetryManager.submit();
+      } else {
+        void TelemetryManager.refreshFromServerIfStale();
+      }
+    };
+
+    let unloadBeaconSent = false;
+    const onUnload = () => {
+      if (unloadBeaconSent) return;
+      unloadBeaconSent = true;
+      submitTelemetryToRigobotViaBeacon();
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("beforeunload", onUnload);
+    window.addEventListener("pagehide", onUnload);
+  }
+
+  if (!skipDuplicateBootstrap) {
+    TelemetryManager.registerListener("compile_struggles", (stepIndicators) => {
+      console.log(stepIndicators, "In compile struggles");
+    });
+    TelemetryManager.registerListener("test_struggles", (stepIndicators) => {
+      if (
+        stepIndicators.metrics.streak_test_struggle === 3 ||
+        stepIndicators.metrics.streak_test_struggle === 9 ||
+        stepIndicators.metrics.streak_test_struggle >= 15
+      ) {
+        setOpenedModals({ testStruggles: true });
+      }
+    });
+    TelemetryManager.registerListener("quiz_struggles", (stepIndicators) => {
+      if (
+        stepIndicators.metrics.streak_quiz_struggles === 3 ||
+        stepIndicators.metrics.streak_quiz_struggles === 9 ||
+        stepIndicators.metrics.streak_quiz_struggles >= 15
+      ) {
+        setOpenedModals({ quizStruggles: true });
+      }
+    });
+
+    const openingPosition = Number(currentExercisePosition);
+    if (typeof openingPosition === "number" && !isNaN(openingPosition)) {
+      registerTelemetryEvent("open_step", {
+        step_slug: steps[openingPosition].slug,
+        step_position: steps[openingPosition].position,
+      });
+    } else {
+      console.error(
+        "Current exercise position is not a number, telemetry won't start, open_step not registered"
+      );
+    }
+  }
+}
+
 const useStore = create<IStore>((set, get) => ({
   language: defaultParams.language || "en",
   mustLoginMessageKey: "you-must-login-message",
@@ -245,6 +338,9 @@ const useStore = create<IStore>((set, get) => ({
     aiMessage: "",
   },
   isCompiling: false,
+  compilationWatchdog: null as ReturnType<typeof setTimeout> | null,
+  evaluationRescue: null as (() => Promise<boolean>) | null,
+  serviceError: false,
   showSidebar: false,
   user_id: null,
   hasSolution: false,
@@ -254,6 +350,8 @@ const useStore = create<IStore>((set, get) => ({
   showFeedback: false,
   token: "",
   bc_token: "",
+  packageId: null as string | null,
+  packageIdSlug: null as string | null,
   buildbuttonText: {
     text: "see-terminal-output",
     className: "",
@@ -354,6 +452,8 @@ const useStore = create<IStore>((set, get) => ({
       }
     }
 
+    set({ appReady: false, appLoadingError: null, appLoadStartTime: Date.now() });
+
     const {
       fetchExercises,
       fetchReadme,
@@ -373,6 +473,10 @@ const useStore = create<IStore>((set, get) => ({
         return checkLoggedStatus({ startConversation: true });
       })
       .then(() => {
+        const { environment: env, token: rigobotToken } = get();
+        if (env === "creatorWeb" && !rigobotToken) {
+          void ensureMinDuration(get().appLoadStartTime).then(() => set({ appReady: true }));
+        }
         return fetchExercises();
       })
       .then(() => checkParams({ justReturn: false }))
@@ -398,6 +502,17 @@ const useStore = create<IStore>((set, get) => ({
         if (currentEnvironment === "creatorWeb") {
           getSyncNotifications();
         }
+      })
+      .catch((error) => {
+        console.error("start(): unhandled error in boot chain", error);
+        set({
+          appReady: false,
+          appLoadingError: {
+            titleKey: "app-loading-error-title",
+            descriptionKey: "app-loading-error-description",
+            actions: [{ label: "app-loading-retry", action: () => get().start(), style: "primary" as const }],
+          },
+        });
       });
   },
 
@@ -431,10 +546,12 @@ const useStore = create<IStore>((set, get) => ({
     } = get();
 
     const debounceTestingSuccess = debounce((data: any) => {
+      get().clearCompilationWatchdog();
+      set({ evaluationRescue: null });
       const stdout = removeSpecialCharacters(data.logs[0]);
 
       setTestResult("successful", stdout);
-      set({ isCompiling: false });
+      set({ isCompiling: false, serviceError: false });
       set({ lastState: "success", terminalShouldShow: true });
       toastFromStatus("testing-success");
       eventBus.emit("assessment_completed", {
@@ -444,7 +561,7 @@ const useStore = create<IStore>((set, get) => ({
         score: 100,
       });
 
-      if (environment === "localStorage") {
+      if (isWebTelemetryEnvironment(environment)) {
         registerTelemetryEvent("test", data.result);
       }
 
@@ -460,7 +577,7 @@ const useStore = create<IStore>((set, get) => ({
       playEffect("success");
       Notifier.confetti();
 
-      if (environment === "localStorage" || environment === "creatorWeb") {
+      if (isWebTelemetryEnvironment(environment)) {
         const currentExercise = getCurrentExercise();
         TelemetryManager.registerTesteableElement(Number(currentExercise.position), {
           hash: currentExercise.slug,
@@ -472,8 +589,10 @@ const useStore = create<IStore>((set, get) => ({
     }, 100);
 
     const debounceTestingError = debounce((data: any) => {
+      get().clearCompilationWatchdog();
+      set({ evaluationRescue: null });
       const stdout = removeSpecialCharacters(data.logs[0]);
-      set({ isCompiling: false });
+      set({ isCompiling: false, serviceError: false });
       setTestResult("failed", stdout);
       set({ lastState: "error", terminalShouldShow: true });
       toastFromStatus("testing-error");
@@ -483,7 +602,7 @@ const useStore = create<IStore>((set, get) => ({
         type: "code",
         score: 0,
       });
-      if (environment === "localStorage") {
+      if (isWebTelemetryEnvironment(environment)) {
         registerTelemetryEvent("test", data.result);
       }
       if (data.ai_required) {
@@ -496,18 +615,33 @@ const useStore = create<IStore>((set, get) => ({
         setBuildButtonPrompt("Try again", "bg-fail text-white");
       }
       playEffect("error");
+
+      if (isWebTelemetryEnvironment(environment)) {
+        const currentExercise = getCurrentExercise();
+        TelemetryManager.registerTesteableElement(
+          Number(currentExercise.position),
+          {
+            hash: currentExercise.slug,
+            searchString: currentExercise.slug,
+            type: "test",
+            is_completed: false,
+          }
+        );
+      }
     }, 100);
 
     let compilerErrorHandler = debounce(async (data: any) => {
       data;
+      get().clearCompilationWatchdog();
+      set({ evaluationRescue: null });
 
       set({ lastState: "error", terminalShouldShow: true });
-      set({ isCompiling: false });
+      set({ isCompiling: false, serviceError: false });
 
       setBuildButtonPrompt("try-again", "bg-fail text-white");
 
       toastFromStatus("compiler-error");
-      if (environment === "localStorage") {
+      if (isWebTelemetryEnvironment(environment)) {
         registerTelemetryEvent("compile", data);
       }
       if (data.ai_required) {
@@ -518,13 +652,15 @@ const useStore = create<IStore>((set, get) => ({
 
     let compilerSuccessHandler = debounce(async (data: any) => {
       data;
+      get().clearCompilationWatchdog();
+      set({ evaluationRescue: null });
       set({ lastState: "success", terminalShouldShow: true });
-      set({ isCompiling: false });
+      set({ isCompiling: false, serviceError: false });
 
       toastFromStatus("compiler-success");
 
       setBuildButtonPrompt("see-terminal-output", "bg-success text-white");
-      if (environment === "localStorage") {
+      if (isWebTelemetryEnvironment(environment)) {
         registerTelemetryEvent("compile", data);
       }
       if (data.ai_required) {
@@ -541,6 +677,19 @@ const useStore = create<IStore>((set, get) => ({
     compilerSocket.onStatus("testing-error", debounceTestingError);
     compilerSocket.onStatus("compiler-error", compilerErrorHandler);
     compilerSocket.onStatus("compiler-success", compilerSuccessHandler);
+
+    compilerSocket.onStatus("service-error", () => {
+      get().failCompilation();
+    });
+
+    compilerSocket.onStatus("retrying", (data: any) => {
+      const text = "Retrying...";
+      if (data?.targetButton === "feedback") {
+        setFeedbackButtonProps(text, "palpitate");
+      } else {
+        setBuildButtonPrompt(text, "palpitate");
+      }
+    });
 
     compilerSocket.onStatus("open_window", () => {
       toastFromStatus("open_window");
@@ -600,6 +749,54 @@ const useStore = create<IStore>((set, get) => ({
 
   setFeedbackButtonProps: (t, c = "") => {
     set({ feedbackbuttonProps: { text: t, className: c } });
+  },
+
+  startCompilationWatchdog: () => {
+    get().clearCompilationWatchdog();
+    const id = setTimeout(async () => {
+      if (!get().isCompiling) return;
+      const rescue = get().evaluationRescue;
+      if (rescue) {
+        const rescued = await rescue();
+        if (rescued) return;
+      }
+      if (get().isCompiling) get().failCompilation();
+    }, RIGOBOT_EVALUATION_TIMEOUT_MS);
+    set({ compilationWatchdog: id });
+  },
+
+  clearCompilationWatchdog: () => {
+    const { compilationWatchdog } = get();
+    if (compilationWatchdog) clearTimeout(compilationWatchdog);
+    set({ compilationWatchdog: null });
+  },
+
+  setEvaluationRescue: (fn) => {
+    set({ evaluationRescue: fn });
+  },
+
+  failCompilation: () => {
+    const {
+      setFeedbackButtonProps,
+      setBuildButtonPrompt,
+      language,
+      targetButtonForFeedback,
+      clearCompilationWatchdog,
+    } = get();
+    clearCompilationWatchdog();
+    set({
+      isCompiling: false,
+      lastState: "error",
+      serviceError: true,
+      evaluationRescue: null,
+    });
+    if (targetButtonForFeedback === "feedback") {
+      setFeedbackButtonProps("retry", "bg-fail text-white");
+    } else {
+      setBuildButtonPrompt("retry", "bg-fail text-white");
+    }
+    const [icon, message] = getStatus("service-error", language);
+    toast.error(message, { icon, duration: 6000 });
   },
 
   setOpenedModals: (modals) => {
@@ -759,6 +956,7 @@ The user's set up the application in "${language}" language, give your feedback 
         } else {
           setOpenedModals({ packageNotFound: true });
         }
+        void ensureMinDuration(get().appLoadStartTime).then(() => set({ appReady: true }));
         return;
       }
     }
@@ -845,7 +1043,17 @@ The user's set up the application in "${language}" language, give your feedback 
         }
       }
 
-      if (config.config.title.us) set({ lessonTitle: config.config.title.us });
+      const courseTitle = resolveCourseTitle(
+        config.config.title,
+        get().language
+      );
+      if (courseTitle) set({ lessonTitle: courseTitle });
+
+      const prevSlug = (get().configObject?.config?.slug ?? "").trim();
+      const newSlug = (config.config.slug ?? "").trim();
+      if (prevSlug !== "" && prevSlug !== newSlug) {
+        set({ packageId: null, packageIdSlug: null });
+      }
 
       set({ configObject: config });
 
@@ -863,6 +1071,23 @@ The user's set up the application in "${language}" language, give your feedback 
       disconnected();
       return false;
     }
+  },
+  fetchPackageMetadata: async () => {
+    const { token, configObject, packageId, packageIdSlug } = get();
+    const slug = (configObject?.config?.slug ?? "").trim();
+    if (!token?.trim() || !slug) {
+      return;
+    }
+    if (slug === packageIdSlug && packageId != null) {
+      return;
+    }
+    const result = await fetchLearnpackPackageInfo(token, slug);
+    if (!result.id) {
+      return;
+    }
+    const idStr = result.id;
+    set({ packageId: idStr, packageIdSlug: slug });
+    TelemetryManager.mergePackageIdIfMissing(idStr);
   },
   checkParams: ({ justReturn }) => {
     const { setLanguage, setPosition, language, setOpenedModals } = get();
@@ -921,7 +1146,7 @@ The user's set up the application in "${language}" language, give your feedback 
   },
 
   fetchSingleExerciseInfo: async (index) => {
-    const { exercises, updateEditorTabs, initCompilerSocket } = get();
+    const { exercises, updateEditorTabs, initCompilerSocket, environment } = get();
 
     if (exercises.length <= 0) {
       return;
@@ -993,7 +1218,7 @@ The user's set up the application in "${language}" language, give your feedback 
       hasSolution: hasSolution,
     });
 
-    if (isTesteable && !TelemetryManager.hasTesteableElementByHash(index, slug)) {
+    if (isTesteable && isWebTelemetryEnvironment(environment) && !TelemetryManager.hasTesteableElementByHash(index, slug)) {
       TelemetryManager.registerTesteableElement(index, {
         hash: slug,
         searchString: slug,
@@ -1018,6 +1243,7 @@ The user's set up the application in "${language}" language, give your feedback 
       setFeedbackButtonProps,
       checkParams,
       registerTelemetryEvent,
+      telemetryReady,
       updateDBSession,
     } = get();
 
@@ -1039,9 +1265,17 @@ The user's set up the application in "${language}" language, give your feedback 
       }
     });
 
-    registerTelemetryEvent("open_step", {
-      step_position: newPosition,
-    });
+    // Only register open_step if telemetry is already initialized. When setPosition
+    // is called during app init (e.g. from checkParams before startTelemetry runs),
+    // TelemetryManager.current is null and the event would be queued as a retry.
+    // That retry fires ~2s later with prevStep already set, incorrectly marking the
+    // step as is_completed=true. startTelemetry() registers the initial open_step
+    // itself once the manager is ready.
+    if (telemetryReady) {
+      registerTelemetryEvent("open_step", {
+        step_position: newPosition,
+      });
+    }
     fetchReadme();
     setTimeout(updateDBSession, 5000);
   },
@@ -1082,6 +1316,47 @@ The user's set up the application in "${language}" language, give your feedback 
     //   conversationId: conversationId,
     // });
   },
+
+  /**
+   * creatorWeb: run after successful loginToRigo (token set). Mirrors start() from
+   * fetchExercises through getSyncNotifications, except initRigoAI is NOT called here —
+   * loginToRigo already calls initRigoAI() in its try block before this. In start(), initRigoAI
+   * runs between startTelemetry and getSyllabus; omitting it here avoids a duplicate call.
+   */
+  bootstrapCreatorWebAfterAuth: async () => {
+    const {
+      fetchExercises,
+      checkParams,
+      fetchReadme,
+      initCompilerSocket,
+      startConversation,
+      setOpenedModals,
+      getOrCreateActiveSession,
+      ensureTelemetryStarted,
+      getSyllabus,
+      getSyncNotifications,
+    } = get();
+
+    const fetchOk = await fetchExercises();
+    if (fetchOk !== true) {
+      setOpenedModals({ login: false, mustLogin: false });
+      return;
+    }
+
+    const params = checkParams({ justReturn: false });
+    if (!params.currentExercise) {
+      await fetchReadme();
+    }
+    initCompilerSocket();
+    RigoAI.load();
+    startConversation(Number(get().currentExercisePosition));
+    setOpenedModals({ login: false, mustLogin: false });
+    await getOrCreateActiveSession();
+    await ensureTelemetryStarted();
+    await getSyllabus();
+    await getSyncNotifications();
+  },
+
   // @ts-ignore
   loginToRigo: async (loginInfo) => {
     const {
@@ -1092,8 +1367,11 @@ The user's set up the application in "${language}" language, give your feedback 
       language,
       reportEnrichDataLayer,
       getOrCreateActiveSession,
+      ensureTelemetryStarted,
       getUserConsumables,
       initRigoAI,
+      environment,
+      bootstrapCreatorWebAfterAuth,
     } = get();
 
     try {
@@ -1134,9 +1412,18 @@ The user's set up the application in "${language}" language, give your feedback 
       }
     }
 
+    if (environment === "creatorWeb") {
+      await bootstrapCreatorWebAfterAuth();
+      return true;
+    }
+
     startConversation(Number(currentExercisePosition));
-    setOpenedModals({ login: false });
-    getOrCreateActiveSession();
+    setOpenedModals({ login: false, mustLogin: false });
+    await getOrCreateActiveSession();
+    if (environment !== "localhost") {
+      set({ appReady: false, appLoadingError: null, appLoadStartTime: Date.now() });
+    }
+    await ensureTelemetryStarted();
     return true;
   },
 
@@ -1146,7 +1433,7 @@ The user's set up the application in "${language}" language, give your feedback 
 
       const acceptRigobot = () => {
         const inviteUrl =
-          "https://rigobot.herokuapp.com/invite?referer=4geeks&lang=" +
+          `${RIGOBOT_HOST}/invite?referer=4geeks&lang=` +
           correctLanguage(language) +
           "&token=" +
           bc_token +
@@ -1183,6 +1470,22 @@ The user's set up the application in "${language}" language, give your feedback 
         };
         await fetch(`${HOST}/set-rigobot-token`, config);
       }
+
+      const {
+        token: rigoToken,
+        configObject,
+        environment: currentEnv,
+        getOrCreateActiveSession,
+        ensureTelemetryStarted,
+      } = get();
+      if (rigoToken && configObject) {
+        await getOrCreateActiveSession();
+        if (currentEnv !== "localhost") {
+          set({ appReady: false, appLoadingError: null, appLoadStartTime: Date.now() });
+        }
+        await ensureTelemetryStarted();
+      }
+
       return data.key;
     } catch (error) {
       console.log(error, "ERROR");
@@ -1303,7 +1606,7 @@ The user's set up the application in "${language}" language, give your feedback 
 
       if (
         editorTabsCopy.length > 0 &&
-        (environment === "localStorage" || environment === "creatorWeb")
+        isWebTelemetryEnvironment(environment)
       ) {
         set({ isTesteable: true, isBuildable: true });
       }
@@ -1452,8 +1755,13 @@ The user's set up the application in "${language}" language, give your feedback 
   },
 
   setLanguage: (language, fetchExercise = true) => {
-    const { fetchReadme, checkParams } = get();
-    set({ language: language });
+    const { fetchReadme, checkParams, configObject } = get();
+    const courseTitle = resolveCourseTitle(configObject?.config?.title, language);
+
+    set({
+      language,
+      ...(courseTitle ? { lessonTitle: courseTitle } : {}),
+    });
 
     let params = checkParams({ justReturn: true });
     setQueryParams({ ...params, language: language });
@@ -1477,9 +1785,8 @@ The user's set up the application in "${language}" language, give your feedback 
       },
     };
     set({ configObject: nextConfig });
-    if (language === "us") {
-      set({ lessonTitle: title });
-    }
+    const courseTitle = resolveCourseTitle(nextTitle, get().language);
+    if (courseTitle) set({ lessonTitle: courseTitle });
   },
 
   getSyllabus: async () => {
@@ -1761,17 +2068,50 @@ The user's set up the application in "${language}" language, give your feedback 
 
   setTestResult: (status, logs) => {
     logs;
-    const { exercises, currentExercisePosition, updateDBSession } = get();
+    const {
+      exercises,
+      currentExercisePosition,
+      editorTabs,
+      environment,
+      mode,
+      updateDBSession,
+    } = get();
     const copy = [...exercises];
+    const pos = Number(currentExercisePosition);
 
-    copy[Number(currentExercisePosition)].done = status === "successful";
+    copy[pos].done = status === "successful";
+
+    const isWebStudent = isWebStudentEnvironment(environment, mode);
+
+    if (status === "successful" && isWebStudent) {
+      const MAX_FILE_SIZE = 50 * 1024;
+      const MAX_TOTAL_SIZE = 200 * 1024;
+      let totalSize = 0;
+      const approvedFiles: TApprovedSolutionFile[] = [];
+
+      for (const tab of editorTabs) {
+        if (tab.name === "terminal") continue;
+        if (tab.name.includes("solution.hide")) continue;
+
+        const size = new Blob([tab.content || ""]).size;
+        if (size > MAX_FILE_SIZE) continue;
+        if (totalSize + size > MAX_TOTAL_SIZE) break;
+
+        approvedFiles.push({ name: tab.name, content: tab.content || "" });
+        totalSize += size;
+      }
+
+      copy[pos].approved_solution_files = approvedFiles;
+    } else if (status === "failed") {
+      copy[pos].approved_solution_files = undefined;
+    }
 
     set({
       exercises: copy,
       lastTestResult: {
         status: status,
         logs: logs,
-      }
+      },
     });
 
     updateDBSession();
@@ -1795,6 +2135,7 @@ The user's set up the application in "${language}" language, give your feedback 
       bc_token,
       toastFromStatus,
       reportEnrichDataLayer,
+      mode,
     } = get();
 
     if (!Boolean(bc_token) || !Boolean(token)) {
@@ -1803,7 +2144,7 @@ The user's set up the application in "${language}" language, give your feedback 
     }
 
     if (
-      (environment === "localStorage" || environment === "creatorWeb") &&
+      isWebStudentEnvironment(environment, mode) &&
       !(
         userConsumables.ai_compilation > 0 ||
         userConsumables.ai_compilation === -1
@@ -1827,6 +2168,7 @@ The user's set up the application in "${language}" language, give your feedback 
 
     setBuildButtonPrompt(buildText, "");
     toastFromStatus("compiling");
+    set({ targetButtonForFeedback: "build" });
 
     const data = {
       exerciseSlug: getCurrentExercise().slug,
@@ -1840,6 +2182,7 @@ The user's set up the application in "${language}" language, give your feedback 
     set({ lastStartedAt: new Date() });
     reportEnrichDataLayer("learnpack_run", {});
     set({ isCompiling: true });
+    get().startCompilationWatchdog();
   },
   setEditorTabs: (tabs) => {
     set({ editorTabs: tabs });
@@ -1860,6 +2203,7 @@ The user's set up the application in "${language}" language, give your feedback 
       environment,
       userConsumables,
       currentContent,
+      mode,
     } = get();
 
     console.log("tokens runnin tests", token, bc_token);
@@ -1869,7 +2213,7 @@ The user's set up the application in "${language}" language, give your feedback 
     }
 
     if (
-      environment === "localStorage" &&
+      isWebStudentEnvironment(environment, mode) &&
       !(
         userConsumables.ai_compilation > 0 ||
         userConsumables.ai_compilation === -1
@@ -1915,6 +2259,7 @@ The user's set up the application in "${language}" language, give your feedback 
 
     if (opts && opts.toast) toastFromStatus("testing");
     set({ isCompiling: true });
+    get().startCompilationWatchdog();
   },
 
   getOrCreateActiveSession: async () => {
@@ -1977,8 +2322,12 @@ The user's set up the application in "${language}" language, give your feedback 
         setOpenedModals({ session: true });
         return;
       } else if (session.tab_hash && session.tab_hash === storedTabHash) {
+        const freshConfig = get().configObject;
         set({
-          configObject: session.config_json,
+          configObject: {
+            ...session.config_json,
+            config: freshConfig.config,
+          },
         });
         set({ sessionKey: session.key });
 
@@ -2225,7 +2574,7 @@ The user's set up the application in "${language}" language, give your feedback 
       throw error;
     }
   },
-  resetExercise: ({ exerciseSlug }) => {
+  resetExercise: async ({ exerciseSlug }) => {
     const {
       updateEditorTabs,
       exercises,
@@ -2234,16 +2583,21 @@ The user's set up the application in "${language}" language, give your feedback 
       setEditorTabs,
       editorTabs,
       reportEnrichDataLayer,
+      configObject,
+      environment,
+      mode,
     } = get();
 
     if (editorTabs.find((tab) => tab.name === "terminal")) {
       setEditorTabs(editorTabs.filter((tab) => tab.name !== "terminal"));
     }
 
-    let newExercises = exercises.map((e) => {
+    const newExercises = exercises.map((e) => {
       if (e.slug === exerciseSlug) {
         return {
           ...e,
+          done: false,
+          approved_solution_files: undefined,
           files: e.files.map((f: any) => {
             delete f.content;
             delete f.modified;
@@ -2255,9 +2609,24 @@ The user's set up the application in "${language}" language, give your feedback 
       }
     });
 
-    set({ exercises: newExercises, lastState: "" });
+    const updatedConfigExercises = (configObject.exercises || []).map(
+      (ex: TExercise) => {
+        const fresh = newExercises.find((e) => e.slug === ex.slug);
+        return fresh ?? ex;
+      }
+    );
 
-    updateDBSession();
+    set({
+      exercises: newExercises,
+      lastState: "",
+      configObject: { ...configObject, exercises: updatedConfigExercises },
+    });
+
+    try {
+      await updateDBSession();
+    } catch (e) {
+      console.error("updateDBSession failed after resetExercise", e);
+    }
 
     const data = {
       exerciseSlug: exerciseSlug,
@@ -2265,6 +2634,54 @@ The user's set up the application in "${language}" language, give your feedback 
     };
     compilerSocket.emit("reset", data);
     reportEnrichDataLayer("learnpack_reset", {});
+
+    const isWebStudent = isWebStudentEnvironment(environment, mode);
+    if (isWebStudent) {
+      const exercise = newExercises.find((e) => e.slug === exerciseSlug);
+      if (exercise) {
+        TelemetryManager.registerTesteableElement(Number(exercise.position), {
+          hash: exercise.slug,
+          searchString: exercise.slug,
+          type: "test",
+          is_completed: false,
+        });
+      }
+    }
+  },
+  unlockExerciseEditing: () => {
+    const {
+      exercises,
+      currentExercisePosition,
+      editorTabs,
+      updateDBSession,
+      environment,
+      mode,
+    } = get();
+    const pos = Number(currentExercisePosition);
+    const exercise = exercises[pos];
+
+    const withoutTerminal = editorTabs.filter((t) => t.name !== "terminal");
+    LocalStorage.setEditorTabs(exercise.slug, withoutTerminal);
+
+    const copy = [...exercises];
+    copy[pos] = {
+      ...copy[pos],
+      done: false,
+      approved_solution_files: undefined,
+    };
+
+    set({ exercises: copy });
+    updateDBSession();
+
+    const isWebStudent = isWebStudentEnvironment(environment, mode);
+    if (isWebStudent) {
+      TelemetryManager.registerTesteableElement(Number(exercise.position), {
+        hash: exercise.slug,
+        searchString: exercise.slug,
+        type: "test",
+        is_completed: false,
+      });
+    }
   },
   sessionActions: async ({ action = "new" }) => {
     const {
@@ -2340,8 +2757,15 @@ The user's set up the application in "${language}" language, give your feedback 
     }
   },
 
-  refreshDataFromAnotherTab: ({ newToken, newTabHash, newBCToken }) => {
-    const { token, bc_token, tabHash, getOrCreateActiveSession, initRigoAI } = get();
+  refreshDataFromAnotherTab: async ({ newToken, newTabHash, newBCToken }) => {
+    const {
+      token,
+      bc_token,
+      tabHash,
+      getOrCreateActiveSession,
+      initRigoAI,
+      ensureTelemetryStarted,
+    } = get();
 
     if (!(token === newToken)) {
       set({ token: newToken });
@@ -2352,8 +2776,9 @@ The user's set up the application in "${language}" language, give your feedback 
     if (!(tabHash === newTabHash)) {
       set({ tabHash: newTabHash });
     }
-    getOrCreateActiveSession();
+    await getOrCreateActiveSession();
     initRigoAI();
+    await ensureTelemetryStarted();
   },
   toggleTheme: () => {
     const { theme, checkParams } = get();
@@ -2417,12 +2842,16 @@ The user's set up the application in "${language}" language, give your feedback 
     } = get();
     if (!bc_token || !configObject) {
       console.error("No token or config found, impossible to start telemetry");
+      await ensureMinDuration(get().appLoadStartTime);
+      set({ appReady: true });
       return;
     }
 
     if (!user || !user.id) {
       console.error("No user found, impossible to start telemetry");
       console.log(user, "User");
+      await ensureMinDuration(get().appLoadStartTime);
+      set({ appReady: true });
       return;
     }
 
@@ -2452,11 +2881,15 @@ The user's set up the application in "${language}" language, give your feedback 
 
       if (!configObject.config.telemetry) {
         console.error("No telemetry urls found in config");
+        await ensureMinDuration(get().appLoadStartTime);
+        set({ appReady: true });
         return;
       }
 
       if (!steps || steps.length === 0) {
         console.error("No steps found in config, telemetry won't start");
+        await ensureMinDuration(get().appLoadStartTime);
+        set({ appReady: true });
         return;
       }
 
@@ -2464,42 +2897,173 @@ The user's set up the application in "${language}" language, give your feedback 
 
       const params = checkParams({ justReturn: true });
 
-      TelemetryManager.start(agent, steps, tutorialSlug, STORAGE_KEY, {
+      // For cloud agent: pre-fetch telemetry with discriminated status so the
+      // UI can show a blocking loading screen instead of silently creating a
+      // blank blob when the GET fails.
+      let prefetchedServerTelemetry: Parameters<typeof TelemetryManager.start>[5] = undefined;
+      if (agent === "cloud" && token && user.id) {
+        set({ telemetryFetchStatus: "loading" });
+        const fetchResult = await fetchTelemetryWithStatus({
+          userId: String(user.id),
+          packageSlug: tutorialSlug,
+          rigoToken: token,
+        });
+
+        if (fetchResult.status === "timeout" || fetchResult.status === "server_error") {
+          if (environment !== "creatorWeb") {
+            const isTimeout = fetchResult.status === "timeout";
+            set({
+              telemetryFetchStatus: fetchResult.status,
+              appLoadingError: {
+                titleKey: isTimeout ? "telemetry-timeout-title" : "telemetry-server-error-title",
+                descriptionKey: isTimeout ? "telemetry-timeout-description" : "telemetry-server-error-description",
+                actions: [
+                  { label: "telemetry-reload", action: () => window.location.reload(), style: "primary" as const },
+                  { label: "telemetry-continue-anyway", action: () => void get().proceedWithTelemetry(), style: "ghost" as const },
+                ],
+              },
+            });
+            return;
+          }
+          set({ telemetryFetchStatus: fetchResult.status });
+        }
+
+        prefetchedServerTelemetry = fetchResult.status === "ok" ? fetchResult.data : null;
+      }
+
+      const skipDuplicateBootstrap =
+        TelemetryManager.started && TelemetryManager.current != null;
+
+      try {
+        await TelemetryManager.start(agent, steps, tutorialSlug, STORAGE_KEY, {
+          token: bc_token,
+          user_id: String(user.id),
+          fullname: user.first_name + " " + user.last_name,
+          rigo_token: token,
+          cohort_id: params.cohort_id || "",
+          academy_id: params.academy_id || "",
+        }, prefetchedServerTelemetry);
+        const pkgId = get().packageId;
+        if (pkgId != null) {
+          TelemetryManager.mergePackageIdIfMissing(pkgId);
+        }
+        set({ telemetryReady: true, telemetryFetchStatus: "ready" });
+        await ensureMinDuration(get().appLoadStartTime);
+        set({ appReady: true });
+      } catch (error) {
+        console.error("Failed to start telemetry", error);
+        set({
+          telemetryReady: false,
+          appLoadingError: {
+            titleKey: "telemetry-generic-error-title",
+            descriptionKey: "telemetry-generic-error-description",
+            actions: [
+              { label: "app-loading-retry", action: () => get().startTelemetry(), style: "primary" as const },
+              { label: "telemetry-continue-anyway", action: () => void get().proceedWithTelemetry(), style: "ghost" as const },
+            ],
+          },
+        });
+        return;
+      }
+
+      _afterTelemetryStarted(agent, steps, skipDuplicateBootstrap, setOpenedModals, registerTelemetryEvent, currentExercisePosition);
+    } else {
+      await ensureMinDuration(get().appLoadStartTime);
+      set({ appReady: true });
+    }
+  },
+
+  proceedWithTelemetry: async () => {
+    const {
+      configObject,
+      bc_token,
+      user,
+      registerTelemetryEvent,
+      environment,
+      setOpenedModals,
+      currentExercisePosition,
+      token,
+      checkParams,
+    } = get();
+
+    if (!bc_token || !configObject || !user?.id) {
+      console.error("proceedWithTelemetry: missing required store values");
+      set({ appReady: true });
+      return;
+    }
+
+    if (!configObject.exercises || configObject.exercises.length === 0) {
+      set({ appReady: true });
+      return;
+    }
+    if (!configObject.config.telemetry) {
+      set({ appReady: true });
+      return;
+    }
+
+    const steps: TStep[] = configObject.exercises.map((e, index) => ({
+      slug: e.slug,
+      position: e.position || index,
+      files: e.files,
+      ai_interactions: [],
+      compilations: [],
+      tests: [],
+      is_testeable: e.graded || false,
+      testeable_elements: [],
+      is_completed: false,
+      sessions: [],
+      quiz_submissions: [],
+      user_skipped: false,
+    }));
+    const agent =
+      environment === "localhost"
+        ? configObject.config?.editor.agent
+        : "cloud";
+    const tutorialSlug = configObject.config?.slug || "";
+    const STORAGE_KEY = "TELEMETRY";
+
+    TelemetryManager.urls = configObject.config.telemetry;
+    const params = checkParams({ justReturn: true });
+    const skipDuplicateBootstrap =
+      TelemetryManager.started && TelemetryManager.current != null;
+
+    try {
+      // null as prefetched: server data is unavailable, reconcile from localStorage only.
+      await TelemetryManager.start(agent, steps, tutorialSlug, STORAGE_KEY, {
         token: bc_token,
         user_id: String(user.id),
         fullname: user.first_name + " " + user.last_name,
         rigo_token: token,
         cohort_id: params.cohort_id || "",
         academy_id: params.academy_id || "",
-      });
-      TelemetryManager.registerListener(
-        "compile_struggles",
-        (stepIndicators) => {
-          console.log(stepIndicators, "In compile struggles");
-        }
-      );
-      TelemetryManager.registerListener("test_struggles", (stepIndicators) => {
-        if (
-          stepIndicators.metrics.streak_test_struggle === 3 ||
-          stepIndicators.metrics.streak_test_struggle === 9 ||
-          stepIndicators.metrics.streak_test_struggle >= 15
-        ) {
-          setOpenedModals({ testStruggles: true });
-        }
-      });
-
-      const openingPosition = Number(currentExercisePosition);
-      if (typeof openingPosition === "number" && !isNaN(openingPosition)) {
-        registerTelemetryEvent("open_step", {
-          step_slug: steps[openingPosition].slug,
-          step_position: steps[openingPosition].position,
-        });
-      } else {
-        console.error(
-          "Current exercise position is not a number, telemetry won't start, open step not registered"
-        );
+      }, null);
+      const pkgId = get().packageId;
+      if (pkgId != null) {
+        TelemetryManager.mergePackageIdIfMissing(pkgId);
       }
+      set({ telemetryReady: true, telemetryFetchStatus: "ready" });
+      await ensureMinDuration(get().appLoadStartTime);
+      set({ appReady: true, appLoadingError: null });
+    } catch (error) {
+      console.error("proceedWithTelemetry: failed to start telemetry", error);
+      set({
+        telemetryReady: false,
+        appLoadingError: {
+          titleKey: "telemetry-generic-error-title",
+          descriptionKey: "telemetry-generic-error-description",
+          actions: [
+            { label: "telemetry-reload", action: () => window.location.reload(), style: "primary" as const },
+          ],
+        },
+      });
+      return;
     }
+
+    _afterTelemetryStarted(agent, steps, skipDuplicateBootstrap, setOpenedModals, registerTelemetryEvent, currentExercisePosition);
+  },
+
+  ensureTelemetryStarted: () => {
+    return get().startTelemetry();
   },
   setRigoContext: (context) => {
     const { rigoContext } = get();
@@ -2572,7 +3136,7 @@ The user's set up the application in "${language}" language, give your feedback 
     );
     const ai_generation = countConsumables(consumables, "ai-generation");
 
-    //const ai_generation = 0;
+    //const ai_generation = -1;
 
     set({
       userConsumables: {
@@ -2631,6 +3195,11 @@ The user's set up the application in "${language}" language, give your feedback 
     });
   },
   displayTestButton: DEV_MODE,
+  telemetryReady: false,
+  telemetryFetchStatus: "idle" as TTelemetryFetchStatus,
+  appReady: false,
+  appLoadingError: null as TAppLoadingError | null,
+  appLoadStartTime: 0,
   getTelemetryStep: async (stepPosition: number) => {
     return await FetchManager.getTelemetryStep(stepPosition);
   },
@@ -2638,6 +3207,8 @@ The user's set up the application in "${language}" language, give your feedback 
   setMode: (mode) => {
     set({ mode });
   },
+  markdownEditorEnabled: false,
+  setMarkdownEditorEnabled: (enabled: boolean) => set({ markdownEditorEnabled: enabled }),
 
   getSidebar: async () => {
     const { token } = get();
@@ -2981,27 +3552,22 @@ The user's set up the application in "${language}" language, give your feedback 
     });
   },
   initRigoAI: () => {
-    const { token, environment } = get();
+    const { token, environment, mode } = get();
 
     if (!token) {
       console.log("ERROR: No token found, initializing RigoAI failed");
       return;
     }
 
-    let purposeSlug = "learnpack-lesson-writer";
-
-    if (environment === "creatorWeb") {
-      purposeSlug = "learnpack-lesson-writer";
-    }
-    if (environment === "localStorage") {
-      purposeSlug = "learnpack-ai-tutor";
-    }
+    const purposeSlug = isWebStudentEnvironment(environment, mode)
+      ? "learnpack-ai-tutor"
+      : "learnpack-lesson-writer";
 
     console.log("Initializing RigoAI with purpose slug", purposeSlug);
 
     RigoAI.init({
       chatHash: "529ca5a219084bc7b93c172ad78ef92a",
-      purposeSlug: "learnpack-lesson-writer",
+      purposeSlug,
       userToken: token,
       context:
         "You are a helpful teacher assistant. Please provide your responses always in MARKDOWN. ",

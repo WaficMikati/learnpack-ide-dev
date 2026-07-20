@@ -6,7 +6,7 @@ import { svgs } from "../../assets/svgs";
 import { Modal } from "../mockups/Modal";
 import ProgressBar from "../composites/ProgressBar/ProgressBar";
 import useStore from "../../utils/store";
-import { publishTutorial, changeSlug, getUserAcademies, getPackageAcademy } from "../../utils/creator";
+import { publishTutorial, changeSlug, getUserAcademies, getPackageAcademy, PackageAcademyInfo } from "../../utils/creator";
 import { toast } from "react-hot-toast";
 import { playEffect, getSlugFromPath, slugify } from "../../utils/lib";
 import { Notifier } from "../../managers/Notifier";
@@ -19,6 +19,76 @@ type Academy = {
   slug: string;
   timezone: string;
 };
+
+/** keep in sync with learnpack-cli/src/utils/api.ts AssetSyncError */
+type AssetSyncError =
+  | { kind: "lang_error"; lang: string; error: { detail: string } }
+  | { kind: "package_error"; error: { detail: string } };
+
+function normalizePublishErrors(raw: unknown): AssetSyncError[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AssetSyncError[] = [];
+  for (const item of raw as Record<string, unknown>[]) {
+    if (item?.kind === "package_error" && item.error && typeof (item.error as { detail?: string }).detail === "string") {
+      out.push({
+        kind: "package_error",
+        error: { detail: (item.error as { detail: string }).detail },
+      });
+    } else if (
+      item?.kind === "lang_error" &&
+      typeof item.lang === "string" &&
+      item.error
+    ) {
+      const er = item.error as { detail?: string; message?: string };
+      out.push({
+        kind: "lang_error",
+        lang: item.lang,
+        error: {
+          detail: String(er.detail ?? er.message ?? JSON.stringify(item.error)),
+        },
+      });
+    } else if (item?.lang != null && item?.error != null) {
+      const er = item.error as { detail?: string; message?: string };
+      out.push({
+        kind: "lang_error",
+        lang: String(item.lang),
+        error: {
+          detail: String(er.detail ?? er.message ?? JSON.stringify(item.error)),
+        },
+      });
+    } else {
+      out.push({
+        kind: "package_error",
+        error: { detail: String((item as { detail?: string })?.detail ?? JSON.stringify(item)) },
+      });
+    }
+  }
+  return out;
+}
+
+function countLangErrors(errors: AssetSyncError[]): number {
+  return errors.filter((e) => e.kind === "lang_error").length;
+}
+
+function publishErrorToastMessage(errors: AssetSyncError[]): string {
+  const onlyPackage =
+    errors.length > 0 && errors.every((e) => e.kind === "package_error");
+  if (onlyPackage) {
+    return errors.map((e) => e.error.detail).join(" ");
+  }
+  const n = countLangErrors(errors);
+  const parts: string[] = [];
+  if (n > 0) {
+    parts.push(`${n} language(s) failed to publish`);
+  }
+  const pkgDetails = errors
+    .filter((e): e is Extract<AssetSyncError, { kind: "package_error" }> => e.kind === "package_error")
+    .map((e) => e.error.detail);
+  if (pkgDetails.length) {
+    parts.push(pkgDetails.join(" "));
+  }
+  return parts.join(". ") || "Publishing completed with issues";
+}
 
 const PublishConfirmationModal: FC<{
   onClose: () => void;
@@ -38,8 +108,7 @@ const PublishConfirmationModal: FC<{
   const [academies, setAcademies] = useState<Academy[]>([]);
   const [selectedAcademyId, setSelectedAcademyId] = useState<number | undefined>(undefined);
   const [loadingAcademies, setLoadingAcademies] = useState(false);
-  const [packageAcademyId, setPackageAcademyId] = useState<number | null>(null);
-  const [isPublished, setIsPublished] = useState(false);
+  const [packageAcademyInfo, setPackageAcademyInfo] = useState<PackageAcademyInfo | null>(null);
   const [loadingPackageInfo, setLoadingPackageInfo] = useState(false);
 
   useEffect(() => {
@@ -62,22 +131,20 @@ const PublishConfirmationModal: FC<{
     if (!bcToken) return;
     const currentSlug = getSlugFromPath();
     if (!currentSlug) return;
-    
+
     try {
       setLoadingPackageInfo(true);
       const packageInfo = await getPackageAcademy(bcToken, currentSlug);
-      setPackageAcademyId(packageInfo.academyId);
-      setIsPublished(packageInfo.isPublished);
-      
-      // If package has an academy, use it automatically
-      if (packageInfo.academyId !== null) {
-        setSelectedAcademyId(packageInfo.academyId);
+      setPackageAcademyInfo(packageInfo);
+
+      // For locked mode, pre-set the academy so it's sent on publish
+      if (packageInfo.mode === "locked" && packageInfo.lockedAcademyId !== undefined) {
+        setSelectedAcademyId(packageInfo.lockedAcademyId);
       }
     } catch (error) {
       console.error("Error fetching package academy:", error);
-      // On error, assume not published so user can still select academy
-      setPackageAcademyId(null);
-      setIsPublished(false);
+      // On error, fall back to select mode so the user can still proceed
+      setPackageAcademyInfo({ isPublished: false, mode: "select" });
     } finally {
       setLoadingPackageInfo(false);
     }
@@ -132,8 +199,8 @@ const PublishConfirmationModal: FC<{
       setLoadingAcademies(true);
       const academiesList = await getUserAcademies(bcToken);
       setAcademies(academiesList);
-      // Auto-select if only one academy
-      if (academiesList.length === 1) {
+      // Auto-select only in select mode (no existing academy association)
+      if (academiesList.length === 1 && packageAcademyInfo?.mode !== "locked") {
         setSelectedAcademyId(academiesList[0].id);
       }
     } catch (error) {
@@ -213,14 +280,14 @@ const PublishConfirmationModal: FC<{
 
             <div className="flex-y gap-small padding-small">
               <label className="text-blue font-medium">{t("tutorial-slug")}</label>
-              <input 
+              <input
                 className="padding-small rounded border"
                 maxLength={47}
                 value={editableSlug}
                 onClick={(e) => e.stopPropagation()}
                 onChange={handleSlugChange}
                 placeholder={t("tutorial-slug")}
-                disabled={isPublished}
+                disabled={packageAcademyInfo?.isPublished}
               />
               <div className="flex-x justify-between align-center">
                 <span className="text-small text-gray-600">{editableSlug.length}/47</span>
@@ -234,14 +301,14 @@ const PublishConfirmationModal: FC<{
                   <span className="text-small text-danger">{t("slug-taken")}</span>
                 )}
               </div>
-              {isPublished && (
+              {packageAcademyInfo?.isPublished && (
                 <p className="text-small text-gray-600 m-0">
                   You can't change the slug in published packages
                 </p>
               )}
             </div>
 
-            {academies.length > 0 && !loadingPackageInfo && packageAcademyId === null && (
+            {!loadingPackageInfo && packageAcademyInfo?.mode === "select" && academies.length > 0 && (
               <div className="flex-y gap-small padding-small">
                 <label className="text-blue font-medium">Academy</label>
                 <select
@@ -258,6 +325,30 @@ const PublishConfirmationModal: FC<{
                     </option>
                   ))}
                 </select>
+              </div>
+            )}
+
+            {!loadingPackageInfo && packageAcademyInfo?.mode === "locked" && (
+              <div className="flex-y gap-small padding-small">
+                <label className="text-blue font-medium">Academy</label>
+                <p className="padding-small rounded border bg-soft-blue text-blue m-0">
+                  {academies.find((a) => a.id === packageAcademyInfo.lockedAcademyId)?.name
+                    ?? `Academy #${packageAcademyInfo.lockedAcademyId}`}
+                </p>
+                <p className="text-small text-gray-600 m-0">
+                  The academy cannot be changed for published packages.
+                </p>
+              </div>
+            )}
+
+            {!loadingPackageInfo && packageAcademyInfo?.mode === "conflict" && (
+              <div className="flex-y gap-small padding-small bg-soft-yellow rounded">
+                <p className="text-yellow font-medium m-0">⚠ Academy conflict</p>
+                <p className="text-small text-yellow m-0">
+                  Your assets are associated with different academies
+                  ({packageAcademyInfo.conflictAcademies?.join(", ")}).
+                  Academy assignment will be skipped.
+                </p>
               </div>
             )}
 
@@ -371,7 +462,7 @@ const PublishingModal: FC<{ onClose: () => void }> = ({ onClose }) => {
   // const getSyllabus = useStore((state) => state.getSyllabus);
   const currentSlug = useStore((state) => state.configObject.config.slug);
   const [deployedUrl, setDeployedUrl] = useState("");
-  const [publishErrors, setPublishErrors] = useState<Array<{ lang: string; error: any }>>([]);
+  const [publishErrors, setPublishErrors] = useState<AssetSyncError[]>([]);
 
   const handlePublish = async (slug: string, academyId?: number) => {
     try {
@@ -400,18 +491,21 @@ const PublishingModal: FC<{ onClose: () => void }> = ({ onClose }) => {
         }
       }
       const res = await publishTutorial(bctoken, token, academyId);
-      
-      // Check for errors in the response
-      if (res.errors && res.errors.length > 0) {
-        setPublishErrors(res.errors);
-        // Show warning toast if there are errors
-        toast.error(`${res.errors.length} language(s) failed to publish`);
-      } else {
+      const errs = normalizePublishErrors(res.errors);
+
+      if (res.url) {
         toast.success(t("tutorial-published-successfully"));
         Notifier.confetti();
         playEffect("success");
       }
-      
+
+      if (errs.length > 0) {
+        setPublishErrors(errs);
+        toast.error(publishErrorToastMessage(errs));
+      } else {
+        setPublishErrors([]);
+      }
+
       setDeployedUrl(res.url);
       setPublishing(false);
       await fetchExercises();
@@ -468,12 +562,41 @@ const PublishingModal: FC<{ onClose: () => void }> = ({ onClose }) => {
             {publishErrors.length > 0 && (
               <div className="flex-y gap-small padding-small bg-yellow-50 border border-yellow-200 rounded">
                 <p className="text-yellow-800 font-medium m-0">
-                  Warning: {publishErrors.length} language(s) failed to publish:
+                  {(() => {
+                    const langErrs = publishErrors.filter(
+                      (e): e is Extract<AssetSyncError, { kind: "lang_error" }> =>
+                        e.kind === "lang_error"
+                    );
+                    const pkgErrs = publishErrors.filter(
+                      (e): e is Extract<AssetSyncError, { kind: "package_error" }> =>
+                        e.kind === "package_error"
+                    );
+                    if (pkgErrs.length > 0 && langErrs.length > 0) {
+                      return t("publish-mixed-notices-heading", {
+                        defaultValue: "Publishing notices:",
+                      });
+                    }
+                    if (pkgErrs.length > 0 && langErrs.length === 0) {
+                      return t("publish-breathecode-sync-heading", {
+                        defaultValue: "Breathecode asset sync:",
+                      });
+                    }
+                    return t("publish-lang-failures-heading", {
+                      count: langErrs.length,
+                      defaultValue: `Warning: ${langErrs.length} language(s) failed to publish:`,
+                    });
+                  })()}
                 </p>
                 <ul className="text-yellow-700 text-small m-0 pl-4">
                   {publishErrors.map((err, index) => (
                     <li key={index}>
-                      <strong>{err.lang}:</strong> {err.error?.detail || err.error?.message || JSON.stringify(err.error)}
+                      {err.kind === "package_error" ? (
+                        <span>{err.error.detail}</span>
+                      ) : (
+                        <>
+                          <strong>{err.lang}:</strong> {err.error.detail}
+                        </>
+                      )}
                     </li>
                   ))}
                 </ul>

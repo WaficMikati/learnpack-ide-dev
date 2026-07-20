@@ -9,8 +9,30 @@ import { LocalStorage } from "../managers/localStorage";
 import assessmentComponentsRaw from "../../docs/assessment_components.yml?raw";
 import explanatoryComponentsRaw from "../../docs/explanatory_components.yml?raw";
 // import toast from "react-hot-toast";
-export const DEV_MODE =true;
-export const DEV_URL = import.meta.env.VITE_DEV_URL || "http://localhost:3000";
+export const DEV_MODE =false;
+export const DEV_URL = import.meta.env.VITE_DEV_URL || "https://1gm40gnb-3000.use2.devtunnels.ms";
+export const LEARNPACK_LOCAL_URL = DEV_MODE ? "http://localhost:3000" : "";
+
+/** Student-facing web envs: localStorage, SCORM, creatorWeb in student mode. */
+export function isWebStudentEnvironment(
+  environment: TEnvironment,
+  mode?: string
+): boolean {
+  return (
+    environment === "localStorage" ||
+    environment === "scorm" ||
+    (environment === "creatorWeb" && mode !== "creator")
+  );
+}
+
+/** Web envs where client-side telemetry/testeable registration applies. */
+export function isWebTelemetryEnvironment(environment: TEnvironment): boolean {
+  return (
+    environment === "localStorage" ||
+    environment === "scorm" ||
+    environment === "creatorWeb"
+  );
+}
 
 export const FASTAPI_HOST = "https://ai.4geeks.com";
 // export const FASTAPI_HOST = "http://localhost:8003";
@@ -64,6 +86,34 @@ export const getEnvironment = async () => {
   const host = getHost();
 
   console.log("DETECTED HOST", host);
+
+  // SCORM SCO: el config vive en `${host}/.learn/config.json`. Se detecta de forma
+  // explícita y primero, porque algunos LMS devuelven un 404 con cuerpo JSON parseable
+  // en otras rutas, lo que haría que la detección legacy se quedara en "localStorage".
+  const includeScormPath = window.location.pathname.endsWith("/config/index.html");
+  if (includeScormPath) {
+    try {
+      const scormConfig = await fetch(`${host}/.learn/config.json`);
+      if (scormConfig.ok) {
+        await scormConfig.json();
+        ENVIRONMENT = "scorm";
+        document.dispatchEvent(
+          new CustomEvent("environment-change", {
+            detail: { environment: "scorm" },
+          })
+        );
+        console.log("The environment will be scorm");
+        return "scorm";
+      }
+    } catch (e) {
+      console.error(
+        "SCORM config fetch failed, falling back to legacy detection",
+        e
+      );
+    }
+    // si no se encontró, continúa con la detección legacy de abajo
+  }
+
   try {
     const slug = getSlugFromPath();
     const response = await fetch(`${host}/config?slug=${slug}`);
@@ -95,6 +145,7 @@ export const getEnvironment = async () => {
     // Fetch config,jsonhandleEnvironmentChange
     try {
       const config = await fetch(`${host}/config.json`);
+      if (!config.ok) throw new Error("config.json not found");
       await config.json();
 
       console.log("The environment will be localStorage");
@@ -111,8 +162,10 @@ export const getEnvironment = async () => {
       try {
         const scormConfig = await fetch(`${host}/.learn/config.json`);
         console.log("SCORM CONFIG PATH", scormConfig);
+        if (!scormConfig.ok) throw new Error(".learn/config.json not found");
         await scormConfig.json();
 
+        ENVIRONMENT = "scorm";
         const myEvent = new CustomEvent("environment-change", {
           detail: { environment: "scorm" },
         });
@@ -130,8 +183,18 @@ export const getEnvironment = async () => {
 
 getEnvironment();
 
-export const RIGOBOT_HOST = "https://rigobot.herokuapp.com";
+export const RIGOBOT_HOST = import.meta.env.VITE_RIGOBOT_HOST || "https://rigobot.herokuapp.com";
 // export const RIGOBOT_HOST = "https://8000-charlytoc-rigobot-bmwdeam7cev.ws-us120.gitpod.io";
+/** Max wait for Rigobot evaluation (tests, builds, open questions) before showing Retry. */
+export const RIGOBOT_EVALUATION_TIMEOUT_MS = 20000;
+/** HTTP rescue poll interval after the evaluation watchdog fires (Pusher may have failed). */
+export const RIGOBOT_RESCUE_POLL_INTERVAL_MS = 2000;
+/** Max HTTP polls during a rescue burst after watchdog timeout. */
+export const RIGOBOT_RESCUE_MAX_ATTEMPTS = 3;
+/** Poll interval when Pusher fires but the completion job is still PENDING. */
+export const RIGOBOT_PUSHER_PENDING_POLL_INTERVAL_MS = 1000;
+/** Max polls while waiting for a PENDING job to reach a terminal status. */
+export const RIGOBOT_PUSHER_PENDING_MAX_ATTEMPTS = 3;
 export const BREATHECODE_HOST = "https://breathecode.herokuapp.com";
 
 export const changeSidebarVisibility = () => {
@@ -369,6 +432,11 @@ export const asyncHashText = async (text: string) => {
   return hashHex;
 };
 
+export async function ensureMinDuration(startTime: number, minMs = 2000): Promise<void> {
+  const elapsed = Date.now() - startTime;
+  if (elapsed < minMs) await new Promise(r => setTimeout(r, minMs - elapsed));
+}
+
 export const removeParam = (param: string) => {
   // Retrieve the current URL
   const url = new URL(window.location.href);
@@ -496,6 +564,27 @@ export function cleanFloatString(input: string): string {
   parts[0] = parts[0].replace(/^0+(?=\d)/, "");
 
   return parts.join(".");
+}
+
+type TCourseTitle = Record<string, string> | string | undefined | null;
+
+/**
+ * Resolves the display title for a course/package from learn.json title fields.
+ */
+export function resolveCourseTitle(
+  title: TCourseTitle,
+  language = "en"
+): string {
+  if (!title) return "";
+  if (typeof title === "string") return title.trim();
+
+  return (
+    title[language]?.trim() ||
+    title.en?.trim() ||
+    title.us?.trim() ||
+    Object.values(title).find((value) => typeof value === "string" && value.trim())?.trim() ||
+    ""
+  );
 }
 
 /**
@@ -733,4 +822,87 @@ export const getComponentsInfo = (has_coding_challenges: boolean = false): strin
   ${explanatoryComponentsRaw}
   `
   return componentsInfoString;
+};
+
+/**
+ * How a menu entry produces its content:
+ * - "image": dedicated image generation flow (generateImage), with style selector.
+ * - "code-challenge": dedicated code challenge flow (generateCodeChallenge).
+ * - "ai-template": generated via Rigobot (request-changes-in-lesson-v2) with preview.
+ */
+export type TComponentGeneration = "ai-template" | "image" | "code-challenge";
+
+export type TMenuComponent = {
+  id: string;
+  group: "explanatory" | "assessment";
+  generation: TComponentGeneration;
+};
+
+export type TImageStyle = {
+  id: string;
+  visualStyle: string;
+};
+
+// Synthetic "image" entry: the 3 explanatory image components (those with a
+// `visualStyle`) collapse into this single entry plus a style selector.
+const IMAGE_COMPONENT_ID = "image";
+
+type TYamlComponent = {
+  name: string;
+  visualStyle?: string;
+  [key: string]: unknown;
+};
+
+const parseYamlComponents = (raw: string): TYamlComponent[] => {
+  try {
+    const parsed = yaml.load(raw) as { components?: TYamlComponent[] };
+    return parsed?.components ?? [];
+  } catch (error) {
+    console.error("Error parsing components YAML:", error);
+    return [];
+  }
+};
+
+/**
+ * Image styles for the "Generate image" sub-input. Derived from the explanatory
+ * components that define a `visualStyle`, prepended with a "free" (no style)
+ * default. Keeps explanatory_components.yml as the single source of truth.
+ */
+export const getImageStyles = (): TImageStyle[] => {
+  const explanatory = parseYamlComponents(explanatoryComponentsRaw);
+  const styled = explanatory
+    .filter((c) => typeof c.visualStyle === "string" && c.visualStyle.trim())
+    .map((c) => ({ id: c.name, visualStyle: c.visualStyle as string }));
+
+  return [{ id: "free", visualStyle: "" }, ...styled];
+};
+
+/**
+ * Menu entries for the "Add" menu, grouped into explanatory and assessment.
+ * Components with a `visualStyle` are NOT listed here (they are image styles);
+ * a single synthetic "image" entry represents image generation instead.
+ */
+export const getMenuComponents = (): TMenuComponent[] => {
+  const toEntry = (
+    c: TYamlComponent,
+    group: "explanatory" | "assessment"
+  ): TMenuComponent => ({
+    id: c.name,
+    group,
+    generation:
+      c.name === "code_challenge_proposal" ? "code-challenge" : "ai-template",
+  });
+
+  const explanatory: TMenuComponent[] = [
+    { id: IMAGE_COMPONENT_ID, group: "explanatory", generation: "image" },
+    ...parseYamlComponents(explanatoryComponentsRaw)
+      .filter((c) => !(typeof c.visualStyle === "string" && c.visualStyle.trim()))
+      .map((c) => toEntry(c, "explanatory")),
+  ];
+
+  const assessment: TMenuComponent[] = parseYamlComponents(
+    assessmentComponentsRaw
+  ).map((c) => toEntry(c, "assessment"));
+
+  return [...explanatory, ...assessment];
 };
