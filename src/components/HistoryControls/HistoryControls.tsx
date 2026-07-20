@@ -37,6 +37,13 @@ export const HistoryControls = () => {
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      // When a text field has focus, let it handle its own undo/redo.
+      // Without this, the listener below preventDefault()s every Ctrl/Cmd+Z in
+      // creator mode, so typing in a block editor could not be undone and a
+      // document-level undo fired instead.
+      const el = event.target as HTMLElement | null;
+      if (el?.isContentEditable || el?.closest?.("input, textarea")) return;
+
       const cmdOrCtrl = isMac ? event.metaKey : event.ctrlKey;
 
       // Ctrl/Cmd + Z = Undo
