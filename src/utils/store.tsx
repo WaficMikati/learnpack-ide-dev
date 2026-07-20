@@ -372,8 +372,6 @@ const useStore = create<IStore>((set, get) => ({
     text: "test-and-send",
     className: "",
   },
-  markdownEditorEnabled: false,
-  setMarkdownEditorEnabled: (enabled: boolean) => set({ markdownEditorEnabled: enabled }),
   // History management state
   historyVersion: "0",
   canUndo: false,

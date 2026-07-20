@@ -512,7 +512,7 @@ export const createGithubRepo = async (
 
 export const resetGithubSync = async (courseSlug: string, targetSHA: string) => {
   const response = await axios.post(
-    `${DEV_MODE ? "http://localhost:3000" : ""}/actions/github/reset-sync`,
+    `${LEARNPACK_LOCAL_URL}/actions/github/reset-sync`,
     { courseSlug, targetSHA }
   );
   return response.data;
@@ -520,7 +520,7 @@ export const resetGithubSync = async (courseSlug: string, targetSHA: string) => 
 
 export const unlinkGithub = async (courseSlug: string) => {
   const response = await axios.post(
-    `${DEV_MODE ? "http://localhost:3000" : ""}/actions/github/unlink`,
+    `${LEARNPACK_LOCAL_URL}/actions/github/unlink`,
     { courseSlug }
   );
   return response.data;
@@ -528,7 +528,7 @@ export const unlinkGithub = async (courseSlug: string) => {
 
 export const relinkGithub = async (courseSlug: string, repository: string) => {
   const response = await axios.post(
-    `${DEV_MODE ? "http://localhost:3000" : ""}/actions/github/relink`,
+    `${LEARNPACK_LOCAL_URL}/actions/github/relink`,
     { courseSlug, repository }
   );
   return response.data;
@@ -540,7 +540,7 @@ export const syncAllTranslations = async (
   rigoToken: string
 ) => {
   const response = await axios.post(
-    `${DEV_MODE ? "http://localhost:3000" : ""}/actions/sync-all-translations?slug=${courseSlug}`,
+    `${LEARNPACK_LOCAL_URL}/actions/sync-all-translations?slug=${courseSlug}`,
     { sourceLanguage },
     { headers: { "x-rigo-token": rigoToken } }
   );
