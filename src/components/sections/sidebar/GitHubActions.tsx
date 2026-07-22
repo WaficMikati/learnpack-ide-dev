@@ -126,6 +126,7 @@ export function GitHubActions() {
         repository: null,
         pathPrefix: null,
         defaultBranch: null,
+        repoNotFound: false,
       });
     } finally {
       setStatusLoading(false);
